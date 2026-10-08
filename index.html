@@ -33,7 +33,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
     <!-- TensorFlow.js and Teachable Machine Libraries -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8.5/dist/teachablemachine-pose.min.js"></script>
 
@@ -260,8 +260,8 @@
                     </div>
                 </div>
                 <div class="mt-1">
-                    <label class="block text-xs text-slate-400 mb-1">🎯 辨識觸發門檻 (<span id="thresholdVal">65</span>%)</label>
-                    <input type="range" id="thresholdSlider" min="40" max="95" value="65" class="w-full accent-space-cyan bg-space-900 rounded-lg cursor-pointer h-1.5">
+                    <label class="block text-xs text-slate-400 mb-1">🎯 辨識觸發門檻 (<span id="thresholdVal">50</span>%)</label>
+                    <input type="range" id="thresholdSlider" min="30" max="95" value="50" class="w-full accent-space-cyan bg-space-900 rounded-lg cursor-pointer h-1.5">
                 </div>
             </div>
 
@@ -286,13 +286,27 @@
 
         let leftClassName = "";
         let rightClassName = "";
-        let confidenceThreshold = 0.65;
+        let confidenceThreshold = 0.50;
 
         // Web Audio Synthesizer
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         let audioCtx = null;
 
-        // DOM Element Bindings (Declared ONCE globally)
+        // DOM Element Bindings (Declared ONCE globally with Canvas & Context)
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas ? canvas.getContext("2d") : null;
+
+        const scoreDisplay = document.getElementById("scoreDisplay");
+        const highScoreDisplay = document.getElementById("highScoreDisplay");
+        const waveDisplay = document.getElementById("waveDisplay");
+        const livesContainer = document.getElementById("livesContainer");
+        const btnStartPause = document.getElementById("btnStartPause");
+        const btnRestart = document.getElementById("btnRestart");
+        const gameOverlay = document.getElementById("gameOverlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlaySubtitle = document.getElementById("overlaySubtitle");
+        const btnOverlayAction = document.getElementById("btnOverlayAction");
+
         const modelStatusTag = document.getElementById("modelStatusTag");
         const webcamContainer = document.getElementById("webcamContainer");
         const predictionList = document.getElementById("predictionList");
@@ -361,6 +375,13 @@
         }
 
         async function initTeachableMachine() {
+            // Ensure compatibility between TFJS versions and Teachable Machine Pose
+            if (window.tf) {
+                if (!window.tf.fromPixels && window.tf.browser && window.tf.browser.fromPixels) {
+                    window.tf.fromPixels = window.tf.browser.fromPixels;
+                }
+            }
+
             let userUrl = inputModelUrl ? inputModelUrl.value.trim() : MODEL_URL;
             if (!userUrl.endsWith("/")) userUrl += "/";
             MODEL_URL = userUrl;
@@ -376,14 +397,34 @@
                 const modelURL = MODEL_URL + "model.json";
                 const metadataURL = MODEL_URL + "metadata.json";
 
-                // Stage 1: Download model files (10s timeout)
+                // 1. 先檢驗 metadata 判斷是否為 Pose (姿態) 模型
+                let isPose = false;
                 try {
-                    model = await withTimeout(tmImage.load(modelURL, metadataURL), 10000, "模型下載超時或檔案不存在 (404)");
-                    isPoseModel = false;
-                } catch (e) {
-                    console.log("嘗試切換為 Pose 模型...", e);
-                    model = await withTimeout(tmPose.load(modelURL, metadataURL), 10000, "模型下載失敗：請確認網址正確且包含 model.json");
+                    const metaReq = await withTimeout(fetch(metadataURL), 4000, "Metadata 超時");
+                    if (metaReq.ok) {
+                        const metaJson = await metaReq.json();
+                        const pkg = (metaJson.package || metaJson.packageName || metaJson.modelName || "").toLowerCase();
+                        if (pkg.includes("pose")) {
+                            isPose = true;
+                        }
+                    }
+                } catch(e) {
+                    console.log("Metadata 預先檢查跳過：", e);
+                }
+
+                // 2. 依據判定結果正確載入 tmPose 或 tmImage
+                if (isPose) {
+                    model = await withTimeout(tmPose.load(modelURL, metadataURL), 10000, "Pose 模型下載超時");
                     isPoseModel = true;
+                } else {
+                    try {
+                        model = await withTimeout(tmImage.load(modelURL, metadataURL), 10000, "Image 模型下載超時");
+                        isPoseModel = false;
+                    } catch (e) {
+                        console.log("嘗試切換為 Pose 模型...", e);
+                        model = await withTimeout(tmPose.load(modelURL, metadataURL), 10000, "模型下載失敗");
+                        isPoseModel = true;
+                    }
                 }
 
                 maxPredictions = model.getTotalClasses();
@@ -481,17 +522,33 @@
             leftClassName = "";
             rightClassName = "";
 
+            // Auto-detect class labels based on keywords
+            for (let i = 0; i < maxPredictions; i++) {
+                const label = labels[i];
+                const lower = label.toLowerCase();
+                if (lower.includes("left") || lower.includes("左")) leftClassName = label;
+                if (lower.includes("right") || lower.includes("右")) rightClassName = label;
+            }
+
+            // Fallback if no matching keyword names found
+            if (!leftClassName && maxPredictions > 0) leftClassName = labels[0];
+            if (!rightClassName && maxPredictions > 1) rightClassName = labels[1];
+
             for (let i = 0; i < maxPredictions; i++) {
                 const label = labels[i];
 
                 selectLeftClass.add(new Option(label, label));
                 selectRightClass.add(new Option(label, label));
 
+                let tagHtml = "";
+                if (label === leftClassName) tagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-space-cyan/20 text-space-cyan border border-space-cyan/40">👈 左傾</span>`;
+                if (label === rightClassName) tagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-space-pink/20 text-space-pink border border-space-pink/40">👉 右傾</span>`;
+
                 const item = document.createElement("div");
                 item.className = "bg-space-900/80 p-2 rounded border border-space-border/60 text-xs flex flex-col gap-1";
                 item.innerHTML = `
                     <div class="flex justify-between items-center">
-                        <span class="font-semibold text-slate-300">${label}</span>
+                        <span class="font-semibold text-slate-300 flex items-center gap-1.5">${label} ${tagHtml}</span>
                         <span class="font-mono text-space-cyan" id="label-score-${i}">0%</span>
                     </div>
                     <div class="w-full bg-space-700 h-1.5 rounded-full overflow-hidden">
@@ -499,18 +556,7 @@
                     </div>
                 `;
                 predictionList.appendChild(item);
-
-                const lower = label.toLowerCase();
-                if (lower.includes("left") || lower.includes("左")) {
-                    leftClassName = label;
-                }
-                if (lower.includes("right") || lower.includes("右")) {
-                    rightClassName = label;
-                }
             }
-
-            if (!leftClassName && maxPredictions > 0) leftClassName = labels[0];
-            if (!rightClassName && maxPredictions > 1) rightClassName = labels[1];
 
             if (leftClassName) selectLeftClass.value = leftClassName;
             if (rightClassName) selectRightClass.value = rightClassName;
@@ -553,6 +599,12 @@
             predictionResult.left = false;
             predictionResult.right = false;
 
+            let leftScore = 0;
+            let rightScore = 0;
+
+            const selectedLeft = selectLeftClass.value;
+            const selectedRight = selectRightClass.value;
+
             for (let i = 0; i < maxPredictions; i++) {
                 const label = predictions[i].className;
                 const score = predictions[i].probability;
@@ -562,6 +614,9 @@
                 const scoreText = document.getElementById(`label-score-${i}`);
                 if (bar) bar.style.width = scorePercent + "%";
                 if (scoreText) scoreText.innerText = scorePercent + "%";
+
+                if (label === selectedLeft) leftScore = score;
+                if (label === selectedRight) rightScore = score;
 
                 if (score > highestScore) {
                     highestScore = score;
@@ -576,28 +631,24 @@
             badgeNeutralHint.className = "py-2 px-1 rounded-lg bg-space-900 border border-slate-600/30 text-slate-400 transition-all flex flex-col items-center justify-center gap-0.5 opacity-60";
             badgeRightHint.className = "py-2 px-1 rounded-lg bg-space-900 border border-space-pink/30 text-slate-400 transition-all flex flex-col items-center justify-center gap-0.5 opacity-60";
 
-            if (highestScore >= confidenceThreshold) {
-                if (highestLabel === selectLeftClass.value && selectLeftClass.value !== "") {
-                    predictionResult.left = true;
-                    detectedCommand.innerText = `👈 身體左傾 (${Math.round(highestScore * 100)}%)`;
-                    detectedCommand.className = "font-mono font-bold text-xs text-space-cyan neon-text-cyan";
+            // Direct trigger based on leftScore and rightScore vs threshold
+            if (leftScore >= confidenceThreshold && leftScore > rightScore && selectedLeft !== "") {
+                predictionResult.left = true;
+                detectedCommand.innerText = `👈 身體左傾 (${Math.round(leftScore * 100)}%)`;
+                detectedCommand.className = "font-mono font-bold text-xs text-space-cyan neon-text-cyan";
 
-                    badgeLeftHint.className = "py-2 px-1 rounded-lg bg-space-cyan/20 border-2 border-space-cyan text-space-cyan font-bold scale-105 neon-glow-cyan transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
-                } else if (highestLabel === selectRightClass.value && selectRightClass.value !== "") {
-                    predictionResult.right = true;
-                    detectedCommand.innerText = `👉 身體右傾 (${Math.round(highestScore * 100)}%)`;
-                    detectedCommand.className = "font-mono font-bold text-xs text-space-pink neon-text-pink";
+                badgeLeftHint.className = "py-2 px-1 rounded-lg bg-space-cyan/20 border-2 border-space-cyan text-space-cyan font-bold scale-105 neon-glow-cyan transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
+            } else if (rightScore >= confidenceThreshold && rightScore > leftScore && selectedRight !== "") {
+                predictionResult.right = true;
+                detectedCommand.innerText = `👉 身體右傾 (${Math.round(rightScore * 100)}%)`;
+                detectedCommand.className = "font-mono font-bold text-xs text-space-pink neon-text-pink";
 
-                    badgeRightHint.className = "py-2 px-1 rounded-lg bg-space-pink/20 border-2 border-space-pink text-space-pink font-bold scale-105 neon-glow-pink transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
-                } else {
-                    detectedCommand.innerText = `🧍 保持直立 (${Math.round(highestScore * 100)}%)`;
-                    detectedCommand.className = "font-mono font-bold text-xs text-slate-200";
-
-                    badgeNeutralHint.className = "py-2 px-1 rounded-lg bg-slate-700/40 border-2 border-slate-300 text-slate-100 font-bold transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
-                }
+                badgeRightHint.className = "py-2 px-1 rounded-lg bg-space-pink/20 border-2 border-space-pink text-space-pink font-bold scale-105 neon-glow-pink transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
             } else {
-                detectedCommand.innerText = `待命中 (${Math.round(highestScore * 100)}%)`;
-                detectedCommand.className = "font-mono font-bold text-xs text-slate-500";
+                detectedCommand.innerText = `🧍 保持直立 (${Math.round(highestScore * 100)}%)`;
+                detectedCommand.className = "font-mono font-bold text-xs text-slate-200";
+
+                badgeNeutralHint.className = "py-2 px-1 rounded-lg bg-slate-700/40 border-2 border-slate-300 text-slate-100 font-bold transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
             }
         }
 
@@ -608,159 +659,110 @@
             thresholdVal.innerText = e.target.value;
         });
 
-        // --- STREAMING_CHUNK:Initializing Space Invaders Game Engine... ---
-        const canvas = document.getElementById("gameCanvas");
-        const ctx = canvas.getContext("2d");
+        // --- STREAMING_CHUNK:Running prediction loop and UI updates... ---
+        let consecutivePredictionErrors = 0;
 
-        const scoreDisplay = document.getElementById("scoreDisplay");
-        const highScoreDisplay = document.getElementById("highScoreDisplay");
-        const waveDisplay = document.getElementById("waveDisplay");
-        const livesContainer = document.getElementById("livesContainer");
-        const btnStartPause = document.getElementById("btnStartPause");
-        const btnRestart = document.getElementById("btnRestart");
-        const gameOverlay = document.getElementById("gameOverlay");
-        const overlayTitle = document.getElementById("overlayTitle");
-        const overlaySubtitle = document.getElementById("overlaySubtitle");
-        const btnOverlayAction = document.getElementById("btnOverlayAction");
+        function startContinuousDetection() {
+            async function predictLoop() {
+                if (webcam && webcam.canvas) {
+                    try {
+                        webcam.update();
+                    } catch(e){}
 
-        let gameState = "IDLE";
-        let score = 0;
-        let highScore = parseInt(localStorage.getItem("invaders_highscore") || "0");
-        let lives = 3;
-        let wave = 1;
-        let autoShootTimer = 0;
-
-        highScoreDisplay.innerText = String(highScore).padStart(5, '0');
-
-        const keys = { Left: false, Right: false, Space: false };
-        window.addEventListener("keydown", (e) => {
-            if (["Space", "ArrowLeft", "ArrowRight", "KeyA", "KeyD"].includes(e.code)) {
-                e.preventDefault();
-            }
-            if (e.code === "ArrowLeft" || e.code === "KeyA") keys.Left = true;
-            if (e.code === "ArrowRight" || e.code === "KeyD") keys.Right = true;
-            if (e.code === "Space") {
-                keys.Space = true;
-                if (gameState === "PLAYING" && !autoFireToggle.checked) {
-                    player.shoot();
-                }
-            }
-        });
-        window.addEventListener("keyup", (e) => {
-            if (e.code === "ArrowLeft" || e.code === "KeyA") keys.Left = false;
-            if (e.code === "ArrowRight" || e.code === "KeyD") keys.Right = false;
-            if (e.code === "Space") keys.Space = false;
-        });
-
-        const player = {
-            x: canvas.width / 2 - 22,
-            y: canvas.height - 50,
-            width: 44,
-            height: 24,
-            speed: 7.0,
-            color: "#00F0FF",
-            
-            draw() {
-                ctx.save();
-                ctx.fillStyle = this.color;
-                ctx.shadowColor = "#00F0FF";
-                ctx.shadowBlur = 12;
-                
-                ctx.beginPath();
-                ctx.moveTo(this.x + this.width / 2, this.y);
-                ctx.lineTo(this.x + this.width, this.y + this.height);
-                ctx.lineTo(this.x + this.width * 0.8, this.y + this.height * 0.7);
-                ctx.lineTo(this.x + this.width * 0.2, this.y + this.height * 0.7);
-                ctx.lineTo(this.x, this.y + this.height);
-                ctx.closePath();
-                ctx.fill();
-
-                ctx.fillRect(this.x + this.width / 2 - 2.5, this.y - 6, 5, 8);
-                ctx.restore();
-            },
-
-            update() {
-                const moveLeft = predictionResult.left || keys.Left;
-                const moveRight = predictionResult.right || keys.Right;
-
-                if (moveLeft && this.x > 10) {
-                    this.x -= this.speed;
-                }
-                if (moveRight && this.x < canvas.width - this.width - 10) {
-                    this.x += this.speed;
-                }
-            },
-
-            shoot() {
-                bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y, -9, "#00F0FF", true));
-                playSound('shoot');
-            }
-        };
-
-        // --- STREAMING_CHUNK:Defining Bunkers, Bullets, Enemies, and Particles... ---
-        class Bunker {
-            constructor(x, y) {
-                this.x = x;
-                this.y = y;
-                this.width = 64;
-                this.height = 40;
-                this.pixelSize = 4;
-                this.gridCols = this.width / this.pixelSize;
-                this.gridRows = this.height / this.pixelSize;
-                this.blocks = [];
-
-                for (let r = 0; r < this.gridRows; r++) {
-                    this.blocks[r] = [];
-                    for (let c = 0; c < this.gridCols; c++) {
-                        if (r > this.gridRows - 4 && c > 3 && c < this.gridCols - 4) {
-                            this.blocks[r][c] = false;
-                        } else if ((r === 0 && (c === 0 || c === this.gridCols - 1)) || 
-                                   (r === 1 && (c === 0 || c === this.gridCols - 1))) {
-                            this.blocks[r][c] = false;
-                        } else {
-                            this.blocks[r][c] = true;
+                    if (!isPredicting && isModelLoaded) {
+                        isPredicting = true;
+                        try {
+                            await runPrediction();
+                        } catch (e) {
+                            // Error captured inside runPrediction
+                        } finally {
+                            isPredicting = false;
                         }
                     }
                 }
+                requestAnimationFrame(predictLoop);
+            }
+            requestAnimationFrame(predictLoop);
+        }
+
+        async function runPrediction() {
+            if (!model || !webcam || !webcam.canvas) return;
+
+            let predictions;
+            try {
+                if (isPoseModel) {
+                    const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+                    predictions = await model.predict(posenetOutput);
+                } else {
+                    predictions = await model.predict(webcam.canvas);
+                }
+                consecutivePredictionErrors = 0;
+            } catch (err) {
+                consecutivePredictionErrors++;
+                console.error("推論失敗：", err);
+                if (consecutivePredictionErrors > 3) {
+                    detectedCommand.innerText = `⚠️ 推論異常: ${err.message || err}`;
+                    detectedCommand.className = "font-mono font-bold text-xs text-rose-400 animate-pulse";
+                }
+                throw err;
             }
 
-            draw() {
-                ctx.save();
-                ctx.fillStyle = "#00FF66";
-                ctx.shadowColor = "#00FF66";
-                ctx.shadowBlur = 4;
+            let highestScore = 0;
+            let highestLabel = "靜止";
 
-                for (let r = 0; r < this.gridRows; r++) {
-                    for (let c = 0; c < this.gridCols; c++) {
-                        if (this.blocks[r][c]) {
-                            ctx.fillRect(
-                                this.x + c * this.pixelSize,
-                                this.y + r * this.pixelSize,
-                                this.pixelSize,
-                                this.pixelSize
-                            );
-                        }
-                    }
+            predictionResult.left = false;
+            predictionResult.right = false;
+
+            let leftScore = 0;
+            let rightScore = 0;
+
+            const selectedLeft = selectLeftClass.value;
+            const selectedRight = selectRightClass.value;
+
+            for (let i = 0; i < maxPredictions; i++) {
+                const label = predictions[i].className;
+                const score = predictions[i].probability;
+                const scorePercent = Math.round(score * 100);
+
+                const bar = document.getElementById(`label-bar-${i}`);
+                const scoreText = document.getElementById(`label-score-${i}`);
+                if (bar) bar.style.width = scorePercent + "%";
+                if (scoreText) scoreText.innerText = scorePercent + "%";
+
+                if (label === selectedLeft) leftScore = score;
+                if (label === selectedRight) rightScore = score;
+
+                if (score > highestScore) {
+                    highestScore = score;
+                    highestLabel = label;
                 }
-                ctx.restore();
             }
 
-            hit(bx, by, radius = 2) {
-                const col = Math.floor((bx - this.x) / this.pixelSize);
-                const row = Math.floor((by - this.y) / this.pixelSize);
+            predictionResult.topLabel = highestLabel;
+            predictionResult.topScore = highestScore;
 
-                let destroyed = false;
-                for (let r = row - radius; r <= row + radius; r++) {
-                    for (let c = col - radius; c <= col + radius; c++) {
-                        if (r >= 0 && r < this.gridRows && c >= 0 && c < this.gridCols) {
-                            if (this.blocks[r][c] && Math.random() < 0.85) {
-                                this.blocks[r][c] = false;
-                                destroyed = true;
-                            }
-                        }
-                    }
-                }
-                return destroyed;
+            badgeLeftHint.className = "py-2 px-1 rounded-lg bg-space-900 border border-space-cyan/30 text-slate-400 transition-all flex flex-col items-center justify-center gap-0.5 opacity-60";
+            badgeNeutralHint.className = "py-2 px-1 rounded-lg bg-space-900 border border-slate-600/30 text-slate-400 transition-all flex flex-col items-center justify-center gap-0.5 opacity-60";
+            badgeRightHint.className = "py-2 px-1 rounded-lg bg-space-900 border border-space-pink/30 text-slate-400 transition-all flex flex-col items-center justify-center gap-0.5 opacity-60";
+
+            // Direct trigger based on leftScore and rightScore vs threshold
+            if (leftScore >= confidenceThreshold && leftScore > rightScore && selectedLeft !== "") {
+                predictionResult.left = true;
+                detectedCommand.innerText = `👈 身體左傾 (${Math.round(leftScore * 100)}%)`;
+                detectedCommand.className = "font-mono font-bold text-xs text-space-cyan neon-text-cyan";
+
+                badgeLeftHint.className = "py-2 px-1 rounded-lg bg-space-cyan/20 border-2 border-space-cyan text-space-cyan font-bold scale-105 neon-glow-cyan transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
+            } else if (rightScore >= confidenceThreshold && rightScore > leftScore && selectedRight !== "") {
+                predictionResult.right = true;
+                detectedCommand.innerText = `👉 身體右傾 (${Math.round(rightScore * 100)}%)`;
+                detectedCommand.className = "font-mono font-bold text-xs text-space-pink neon-text-pink";
+
+                badgeRightHint.className = "py-2 px-1 rounded-lg bg-space-pink/20 border-2 border-space-pink text-space-pink font-bold scale-105 neon-glow-pink transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
+            } else {
+                detectedCommand.innerText = `🧍 保持直立 (${Math.round(highestScore * 100)}%)`;
+                detectedCommand.className = "font-mono font-bold text-xs text-slate-200";
+
+                badgeNeutralHint.className = "py-2 px-1 rounded-lg bg-slate-700/40 border-2 border-slate-300 text-slate-100 font-bold transition-all flex flex-col items-center justify-center gap-0.5 opacity-100";
             }
         }
 
@@ -852,6 +854,113 @@
             }
         }
 
+        class Player {
+            constructor() {
+                this.width = 48;
+                this.height = 24;
+                this.x = canvas ? (canvas.width - this.width) / 2 : 376;
+                this.y = canvas ? canvas.height - 50 : 550;
+                this.speed = 6;
+                this.cooldown = 0;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.fillStyle = "#00F0FF";
+                ctx.shadowColor = "#00F0FF";
+                ctx.shadowBlur = 10;
+
+                ctx.fillRect(this.x + 18, this.y, 12, 6);
+                ctx.fillRect(this.x + 12, this.y + 6, 24, 6);
+                ctx.fillRect(this.x, this.y + 12, this.width, 12);
+                ctx.fillStyle = "#FF007A";
+                ctx.fillRect(this.x + 4, this.y + 18, 6, 6);
+                ctx.fillRect(this.x + this.width - 10, this.y + 18, 6, 6);
+
+                ctx.restore();
+            }
+
+            update() {
+                if (this.cooldown > 0) this.cooldown--;
+
+                if (predictionResult.left || keys["ArrowLeft"] || keys["a"] || keys["A"]) {
+                    this.x -= this.speed;
+                }
+                if (predictionResult.right || keys["ArrowRight"] || keys["d"] || keys["D"]) {
+                    this.x += this.speed;
+                }
+
+                if (this.x < 10) this.x = 10;
+                if (this.x > canvas.width - this.width - 10) this.x = canvas.width - this.width - 10;
+            }
+
+            shoot() {
+                if (this.cooldown <= 0) {
+                    bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -8, "#00F0FF", true));
+                    playSound('shoot');
+                    this.cooldown = 12;
+                }
+            }
+        }
+
+        class Bunker {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.width = 64;
+                this.height = 40;
+                this.rows = 5;
+                this.cols = 8;
+                this.blockWidth = 8;
+                this.blockHeight = 8;
+                this.blocks = [];
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        if (r >= 3 && (c === 3 || c === 4)) continue;
+                        this.blocks.push({
+                            x: this.x + c * this.blockWidth,
+                            y: this.y + r * this.blockHeight,
+                            alive: true
+                        });
+                    }
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.fillStyle = "#00FF66";
+                ctx.shadowColor = "#00FF66";
+                ctx.shadowBlur = 4;
+                this.blocks.forEach(b => {
+                    if (b.alive) {
+                        ctx.fillRect(b.x, b.y, this.blockWidth - 1, this.blockHeight - 1);
+                    }
+                });
+                ctx.restore();
+            }
+
+            hit(bulletX, bulletY) {
+                let hit = false;
+                this.blocks.forEach(b => {
+                    if (b.alive && bulletX >= b.x && bulletX <= b.x + this.blockWidth &&
+                        bulletY >= b.y && bulletY <= b.y + this.blockHeight) {
+                        b.alive = false;
+                        hit = true;
+                    }
+                });
+                return hit;
+            }
+        }
+
+        // Game State & Entity Variables
+        let gameState = "IDLE";
+        let score = 0;
+        let highScore = parseInt(localStorage.getItem("invaders_highscore")) || 0;
+        let wave = 1;
+        let lives = 3;
+        let autoShootTimer = 0;
+        let player = new Player();
+
         let bullets = [];
         let enemies = [];
         let particles = [];
@@ -859,6 +968,28 @@
         let enemyDirection = 1;
         let enemyMoveTimer = 0;
         let enemyMoveInterval = 30;
+
+        const keys = {};
+        window.addEventListener("keydown", (e) => {
+            keys[e.key] = true;
+            if (e.key === " " || e.key === "Spacebar") {
+                e.preventDefault();
+                if (gameState === "PLAYING" && player) player.shoot();
+            }
+            if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
+                e.preventDefault();
+            }
+        });
+        window.addEventListener("keyup", (e) => {
+            keys[e.key] = false;
+        });
+
+        const stars = Array.from({ length: 40 }, () => ({
+            x: Math.random() * (canvas ? canvas.width : 800),
+            y: Math.random() * (canvas ? canvas.height : 600),
+            size: Math.random() * 1.8,
+            alpha: Math.random()
+        }));
 
         function spawnEnemies() {
             enemies = [];
@@ -1036,13 +1167,6 @@
             requestAnimationFrame(gameLoop);
         }
 
-        const stars = Array.from({ length: 40 }, () => ({
-            x: Math.random() * canvas.width,
-            y: Math.random() * canvas.height,
-            size: Math.random() * 1.8,
-            alpha: Math.random()
-        }));
-
         function drawStars() {
             ctx.save();
             stars.forEach(s => {
@@ -1059,6 +1183,7 @@
             wave = 1;
             bullets = [];
             particles = [];
+            player = new Player();
             updateHUD();
             spawnEnemies();
             createBunkers();
