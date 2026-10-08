@@ -32,7 +32,7 @@
     </script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
-    <!-- TensorFlow.js and Teachable Machine Libraries (Locked Compatible Versions) -->
+    <!-- TensorFlow.js and Teachable Machine Libraries -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8.5/dist/teachablemachine-pose.min.js"></script>
@@ -124,7 +124,7 @@
                         <span class="text-space-cyan font-bold">👈 身體左傾</span> 太空艙向左移動<br>
                         <span class="text-space-pink font-bold">👉 身體右傾</span> 太空艙向右移動！
                     </p>
-                    <button id="btnOverlayAction" class="mt-2 px-8 py-3 bg-gradient-to-r from-space-cyan to-blue-500 text-space-900 font-bold rounded-xl shadow-lg hover:brightness-110 active:scale-95 transition">
+                    <button id="btnOverlayAction" class="mt-2 px-8 py-3 bg-gradient-to-r from-space-cyan to-blue-500 text-space-900 font-bold rounded-xl shadow-lg hover:brightness-110 active:scale-95 transition cursor-pointer">
                         進入遊戲
                     </button>
                 </div>
@@ -230,8 +230,20 @@
             <!-- 動作映射設定 -->
             <div class="bg-space-800 border border-space-border rounded-xl p-4 shadow-lg flex flex-col gap-3">
                 <h3 class="font-bold text-sm text-slate-200 flex items-center gap-2">
-                    <i class="fa-solid fa-sliders text-space-cyan"></i> 動作對應選單
+                    <i class="fa-solid fa-sliders text-space-cyan"></i> 動作對應與模型設定
                 </h3>
+
+                <!-- 自訂 Teachable Machine 模型網址輸入框 -->
+                <div>
+                    <label class="block text-slate-400 text-xs mb-1">🔗 Teachable Machine 模型 URL</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="inputModelUrl" value="https://teachablemachine.withgoogle.com/models/9qGt3_30b/" class="w-full bg-space-900 border border-space-border rounded px-2.5 py-1.5 text-xs text-slate-200 focus:border-space-cyan focus:outline-none font-mono">
+                        <button id="btnReloadModel" class="px-3 py-1.5 bg-space-cyan text-space-900 font-bold text-xs rounded hover:bg-cyan-300 transition-all flex items-center gap-1 whitespace-nowrap cursor-pointer">
+                            <i class="fa-solid fa-rotate"></i> 載入
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-slate-500 mt-1">例如: https://teachablemachine.withgoogle.com/models/YOUR_MODEL_ID/</p>
+                </div>
 
                 <div class="grid grid-cols-2 gap-3 text-xs">
                     <div>
@@ -262,7 +274,8 @@
     </footer>
 
     <script>
-        const MODEL_URL = "https://teachablemachine.withgoogle.com/models/9qGt3_30b/";
+        // --- 1. Global Variables & References ---
+        let MODEL_URL = "https://teachablemachine.withgoogle.com/models/9qGt3_30b/";
         
         let model, webcam, maxPredictions = 0;
         let isPoseModel = false;
@@ -279,14 +292,24 @@
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         let audioCtx = null;
 
-        // Promise 超時保護輔助函式
-        function withTimeout(promise, ms, errorMessage) {
-            let timeout = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error(errorMessage)), ms)
-            );
-            return Promise.race([promise, timeout]);
-        }
+        // DOM Element Bindings (Declared ONCE globally)
+        const modelStatusTag = document.getElementById("modelStatusTag");
+        const webcamContainer = document.getElementById("webcamContainer");
+        const predictionList = document.getElementById("predictionList");
+        const detectedCommand = document.getElementById("detectedCommand");
+        const selectLeftClass = document.getElementById("selectLeftClass");
+        const selectRightClass = document.getElementById("selectRightClass");
+        const thresholdSlider = document.getElementById("thresholdSlider");
+        const thresholdVal = document.getElementById("thresholdVal");
+        const autoFireToggle = document.getElementById("autoFireToggle");
+        const inputModelUrl = document.getElementById("inputModelUrl");
+        const btnReloadModel = document.getElementById("btnReloadModel");
 
+        const badgeLeftHint = document.getElementById("badgeLeftHint");
+        const badgeNeutralHint = document.getElementById("badgeNeutralHint");
+        const badgeRightHint = document.getElementById("badgeRightHint");
+
+        // --- STREAMING_CHUNK:Defining audio helper function... ---
         function playSound(type) {
             try {
                 if (!audioCtx) audioCtx = new AudioCtx();
@@ -325,25 +348,23 @@
                     osc.stop(now + 0.15);
                 }
             } catch (e) {
-                // Ignore audio restriction errors
+                // Ignore audio context autoplay restrictions
             }
         }
 
-        const modelStatusTag = document.getElementById("modelStatusTag");
-        const webcamContainer = document.getElementById("webcamContainer");
-        const predictionList = document.getElementById("predictionList");
-        const detectedCommand = document.getElementById("detectedCommand");
-        const selectLeftClass = document.getElementById("selectLeftClass");
-        const selectRightClass = document.getElementById("selectRightClass");
-        const thresholdSlider = document.getElementById("thresholdSlider");
-        const thresholdVal = document.getElementById("thresholdVal");
-        const autoFireToggle = document.getElementById("autoFireToggle");
-
-        const badgeLeftHint = document.getElementById("badgeLeftHint");
-        const badgeNeutralHint = document.getElementById("badgeNeutralHint");
-        const badgeRightHint = document.getElementById("badgeRightHint");
+        // --- STREAMING_CHUNK:Defining Teachable Machine loader... ---
+        function withTimeout(promise, ms, errorMessage) {
+            let timeout = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error(errorMessage)), ms)
+            );
+            return Promise.race([promise, timeout]);
+        }
 
         async function initTeachableMachine() {
+            let userUrl = inputModelUrl ? inputModelUrl.value.trim() : MODEL_URL;
+            if (!userUrl.endsWith("/")) userUrl += "/";
+            MODEL_URL = userUrl;
+
             detectedCommand.innerText = "下載 AI 模型中...";
             modelStatusTag.innerHTML = `<i class="fa-solid fa-spinner animate-spin"></i> 下載 AI 模型中...`;
 
@@ -355,22 +376,36 @@
                 const modelURL = MODEL_URL + "model.json";
                 const metadataURL = MODEL_URL + "metadata.json";
 
-                // 階段 1：下載模型檔 (上限 10 秒)
+                // Stage 1: Download model files (10s timeout)
                 try {
-                    model = await withTimeout(tmImage.load(modelURL, metadataURL), 10000, "模型下載超時");
+                    model = await withTimeout(tmImage.load(modelURL, metadataURL), 10000, "模型下載超時或檔案不存在 (404)");
                     isPoseModel = false;
                 } catch (e) {
                     console.log("嘗試切換為 Pose 模型...", e);
-                    model = await withTimeout(tmPose.load(modelURL, metadataURL), 10000, "Pose 模型下載超時");
+                    model = await withTimeout(tmPose.load(modelURL, metadataURL), 10000, "模型下載失敗：請確認網址正確且包含 model.json");
                     isPoseModel = true;
                 }
 
                 maxPredictions = model.getTotalClasses();
+                setupClassOptions();
 
-                // 階段 2：初始化攝影機 (上限 8 秒)
-                detectedCommand.innerText = "要求開啟攝影機...";
-                modelStatusTag.innerHTML = `<i class="fa-solid fa-camera animate-pulse"></i> 正在開啟攝影機...`;
+                isModelLoaded = true;
+                btnStartPause.disabled = false;
 
+                // Stage 2: Initialize Webcam
+                await initWebcam();
+
+            } catch (err) {
+                console.warn("AI 模型下載或載入異常：", err);
+                showFallbackKeyboardMode(err.message || "模型載入失敗");
+            }
+        }
+
+        async function initWebcam() {
+            detectedCommand.innerText = "要求開啟攝影機...";
+            modelStatusTag.innerHTML = `<i class="fa-solid fa-camera animate-pulse"></i> 正在開啟攝影機...`;
+
+            try {
                 const flip = true; 
                 if (isPoseModel) {
                     webcam = new tmPose.Webcam(320, 240, flip);
@@ -378,27 +413,29 @@
                     webcam = new tmImage.Webcam(320, 240, flip);
                 }
                 
-                await withTimeout(webcam.setup(), 8000, "攝影機權限受限或回應超時");
+                // Modern browsers require camera access to be triggered directly or granted via permission prompt
+                await withTimeout(webcam.setup({ requestPage: false }), 6000, "攝影機權限受限或回應超時");
                 await webcam.play();
                 
                 webcamContainer.innerHTML = "";
                 webcamContainer.appendChild(webcam.canvas);
                 webcam.canvas.classList.add("w-full", "h-full", "object-cover");
 
-                setupClassOptions();
-
                 modelStatusTag.className = "text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5";
                 modelStatusTag.innerHTML = `<i class="fa-solid fa-circle-check"></i> 體感連續偵測中`;
 
-                isModelLoaded = true;
-                btnStartPause.disabled = false;
-
                 startContinuousDetection();
 
-            } catch (err) {
-                console.error("AI 模型或鏡頭載入異常：", err);
-                showFallbackKeyboardMode(err.message || "鏡頭/模型載入失敗");
+            } catch (webcamErr) {
+                console.warn("攝影機啟動受限：", webcamErr);
+                showFallbackKeyboardMode("攝影機存取受限或未允許權限");
             }
+        }
+
+        if (btnReloadModel) {
+            btnReloadModel.addEventListener("click", () => {
+                initTeachableMachine();
+            });
         }
 
         function showFallbackKeyboardMode(reason = "") {
@@ -407,14 +444,14 @@
 
             webcamContainer.innerHTML = `
                 <div class="p-4 text-center flex flex-col items-center justify-center gap-2">
-                    <i class="fa-solid fa-camera-slash text-amber-400 text-2xl mb-1"></i>
-                    <div class="text-xs text-slate-200 font-bold">無法啟動鏡頭模型 (${reason})</div>
+                    <i class="fa-solid fa-video-slash text-amber-400 text-2xl mb-1"></i>
+                    <div class="text-xs text-slate-200 font-bold">${reason}</div>
                     <div class="text-[11px] text-slate-400 max-w-xs leading-relaxed">
                         已自動切換為 <span class="text-space-cyan font-bold">鍵盤操控模式</span>！<br>
                         使用 <kbd class="px-1 bg-space-700 rounded text-slate-200">A</kbd>/<kbd class="px-1 bg-space-700 rounded text-slate-200">D</kbd> 或 <kbd class="px-1 bg-space-700 rounded text-slate-200">←</kbd>/<kbd class="px-1 bg-space-700 rounded text-slate-200">→</kbd> 控制左右，<kbd class="px-1 bg-space-700 rounded text-slate-200">Space</kbd> 射擊。
                     </div>
-                    <button onclick="initTeachableMachine()" class="mt-2 px-3 py-1.5 bg-space-700 hover:bg-space-border text-xs text-slate-200 rounded-lg transition-all flex items-center gap-1.5 border border-space-border cursor-pointer">
-                        <i class="fa-solid fa-rotate-right"></i> 重新連線攝影機 / 模型
+                    <button onclick="requestCameraAccess()" class="mt-2 px-3 py-1.5 bg-space-cyan hover:bg-cyan-300 text-space-900 font-bold text-xs rounded-lg transition-all flex items-center gap-1.5 shadow-md cursor-pointer">
+                        <i class="fa-solid fa-camera"></i> 點擊授權與啟動攝影機
                     </button>
                 </div>
             `;
@@ -425,6 +462,15 @@
             btnStartPause.disabled = false;
         }
 
+        async function requestCameraAccess() {
+            if (!isModelLoaded) {
+                await initTeachableMachine();
+            } else {
+                await initWebcam();
+            }
+        }
+
+        // --- STREAMING_CHUNK:Setting up class mapping options... ---
         function setupClassOptions() {
             selectLeftClass.innerHTML = '<option value="">(無)</option>';
             selectRightClass.innerHTML = '<option value="">(無)</option>';
@@ -470,6 +516,7 @@
             if (rightClassName) selectRightClass.value = rightClassName;
         }
 
+        // --- STREAMING_CHUNK:Running prediction loop and UI updates... ---
         function startContinuousDetection() {
             async function predictLoop() {
                 if (webcam && webcam.canvas && webcam.canvas.width > 0) {
@@ -561,6 +608,7 @@
             thresholdVal.innerText = e.target.value;
         });
 
+        // --- STREAMING_CHUNK:Initializing Space Invaders Game Engine... ---
         const canvas = document.getElementById("gameCanvas");
         const ctx = canvas.getContext("2d");
 
@@ -649,6 +697,7 @@
             }
         };
 
+        // --- STREAMING_CHUNK:Defining Bunkers, Bullets, Enemies, and Particles... ---
         class Bunker {
             constructor(x, y) {
                 this.x = x;
@@ -855,6 +904,7 @@
             }
         }
 
+        // --- STREAMING_CHUNK:Executing main render loop... ---
         function gameLoop() {
             if (gameState === "PLAYING") {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -908,6 +958,7 @@
 
                 enemies.forEach(enemy => enemy.draw());
 
+                // Bullet collisions with bunkers
                 bullets.forEach(bullet => {
                     bunkers.forEach(bunker => {
                         if (!bullet.markedForDeletion &&
@@ -923,6 +974,7 @@
                     });
                 });
 
+                // Bullet collisions with player and enemies
                 bullets.forEach(bullet => {
                     if (bullet.isPlayer) {
                         enemies.forEach(enemy => {
@@ -1000,6 +1052,7 @@
             ctx.restore();
         }
 
+        // --- STREAMING_CHUNK:Binding game controls and lifecycle listeners... ---
         function startGame() {
             score = 0;
             lives = 3;
