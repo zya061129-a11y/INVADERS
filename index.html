@@ -1,4 +1,4 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-TW" class="dark">
 <head>
     <meta charset="UTF-8">
@@ -32,10 +32,10 @@
     </script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
-    <!-- TensorFlow.js and Teachable Machine Libraries -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@latest/dist/teachablemachine-pose.min.js"></script>
+    <!-- TensorFlow.js and Teachable Machine Libraries (Locked Compatible Versions) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8.5/dist/teachablemachine-pose.min.js"></script>
 
     <style>
         .neon-glow-cyan { box-shadow: 0 0 15px rgba(0, 240, 255, 0.6); }
@@ -279,6 +279,14 @@
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         let audioCtx = null;
 
+        // Promise 超時保護輔助函式
+        function withTimeout(promise, ms, errorMessage) {
+            let timeout = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error(errorMessage)), ms)
+            );
+            return Promise.race([promise, timeout]);
+        }
+
         function playSound(type) {
             try {
                 if (!audioCtx) audioCtx = new AudioCtx();
@@ -336,6 +344,9 @@
         const badgeRightHint = document.getElementById("badgeRightHint");
 
         async function initTeachableMachine() {
+            detectedCommand.innerText = "下載 AI 模型中...";
+            modelStatusTag.innerHTML = `<i class="fa-solid fa-spinner animate-spin"></i> 下載 AI 模型中...`;
+
             try {
                 if (webcam && typeof webcam.stop === 'function') {
                     try { webcam.stop(); } catch(e){}
@@ -344,16 +355,21 @@
                 const modelURL = MODEL_URL + "model.json";
                 const metadataURL = MODEL_URL + "metadata.json";
 
+                // 階段 1：下載模型檔 (上限 10 秒)
                 try {
-                    model = await tmImage.load(modelURL, metadataURL);
+                    model = await withTimeout(tmImage.load(modelURL, metadataURL), 10000, "模型下載超時");
                     isPoseModel = false;
                 } catch (e) {
-                    console.log("切換嘗試以 Pose 模型載入...", e);
-                    model = await tmPose.load(modelURL, metadataURL);
+                    console.log("嘗試切換為 Pose 模型...", e);
+                    model = await withTimeout(tmPose.load(modelURL, metadataURL), 10000, "Pose 模型下載超時");
                     isPoseModel = true;
                 }
 
                 maxPredictions = model.getTotalClasses();
+
+                // 階段 2：初始化攝影機 (上限 8 秒)
+                detectedCommand.innerText = "要求開啟攝影機...";
+                modelStatusTag.innerHTML = `<i class="fa-solid fa-camera animate-pulse"></i> 正在開啟攝影機...`;
 
                 const flip = true; 
                 if (isPoseModel) {
@@ -362,7 +378,7 @@
                     webcam = new tmImage.Webcam(320, 240, flip);
                 }
                 
-                await webcam.setup();
+                await withTimeout(webcam.setup(), 8000, "攝影機權限受限或回應超時");
                 await webcam.play();
                 
                 webcamContainer.innerHTML = "";
@@ -381,28 +397,32 @@
 
             } catch (err) {
                 console.error("AI 模型或鏡頭載入異常：", err);
-                modelStatusTag.className = "text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1.5";
-                modelStatusTag.innerHTML = `<i class="fa-solid fa-keyboard"></i> 已啟用鍵盤模式`;
-                
-                webcamContainer.innerHTML = `
-                    <div class="p-4 text-center flex flex-col items-center justify-center gap-2">
-                        <i class="fa-solid fa-camera-slash text-amber-400 text-2xl mb-1"></i>
-                        <div class="text-xs text-slate-200 font-bold">無法存取攝影機（或權限受限）</div>
-                        <div class="text-[11px] text-slate-400 max-w-xs leading-relaxed">
-                            已自動開啟 <span class="text-space-cyan font-bold">鍵盤操控模式</span>。<br>
-                            使用 <kbd class="px-1 bg-space-700 rounded text-slate-200">A</kbd>/<kbd class="px-1 bg-space-700 rounded text-slate-200">D</kbd> 或 <kbd class="px-1 bg-space-700 rounded text-slate-200">←</kbd>/<kbd class="px-1 bg-space-700 rounded text-slate-200">→</kbd> 控制左右，<kbd class="px-1 bg-space-700 rounded text-slate-200">Space</kbd> 發射。
-                        </div>
-                        <button onclick="initTeachableMachine()" class="mt-2 px-3 py-1.5 bg-space-700 hover:bg-space-border text-xs text-slate-200 rounded-lg transition-all flex items-center gap-1.5 border border-space-border cursor-pointer">
-                            <i class="fa-solid fa-rotate-right"></i> 重新嘗試連接攝影機
-                        </button>
-                    </div>
-                `;
-
-                detectedCommand.innerText = "鍵盤控制備援中";
-                detectedCommand.className = "font-mono font-bold text-xs text-space-yellow";
-
-                btnStartPause.disabled = false;
+                showFallbackKeyboardMode(err.message || "鏡頭/模型載入失敗");
             }
+        }
+
+        function showFallbackKeyboardMode(reason = "") {
+            modelStatusTag.className = "text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1.5";
+            modelStatusTag.innerHTML = `<i class="fa-solid fa-keyboard"></i> 已啟用鍵盤模式`;
+
+            webcamContainer.innerHTML = `
+                <div class="p-4 text-center flex flex-col items-center justify-center gap-2">
+                    <i class="fa-solid fa-camera-slash text-amber-400 text-2xl mb-1"></i>
+                    <div class="text-xs text-slate-200 font-bold">無法啟動鏡頭模型 (${reason})</div>
+                    <div class="text-[11px] text-slate-400 max-w-xs leading-relaxed">
+                        已自動切換為 <span class="text-space-cyan font-bold">鍵盤操控模式</span>！<br>
+                        使用 <kbd class="px-1 bg-space-700 rounded text-slate-200">A</kbd>/<kbd class="px-1 bg-space-700 rounded text-slate-200">D</kbd> 或 <kbd class="px-1 bg-space-700 rounded text-slate-200">←</kbd>/<kbd class="px-1 bg-space-700 rounded text-slate-200">→</kbd> 控制左右，<kbd class="px-1 bg-space-700 rounded text-slate-200">Space</kbd> 射擊。
+                    </div>
+                    <button onclick="initTeachableMachine()" class="mt-2 px-3 py-1.5 bg-space-700 hover:bg-space-border text-xs text-slate-200 rounded-lg transition-all flex items-center gap-1.5 border border-space-border cursor-pointer">
+                        <i class="fa-solid fa-rotate-right"></i> 重新連線攝影機 / 模型
+                    </button>
+                </div>
+            `;
+
+            detectedCommand.innerText = "鍵盤控制備援中";
+            detectedCommand.className = "font-mono font-bold text-xs text-space-yellow";
+
+            btnStartPause.disabled = false;
         }
 
         function setupClassOptions() {
